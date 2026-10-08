@@ -188,7 +188,7 @@ pub mod ansi_test_utils {
         );
         let diff_style_sections = vec![vec![(syntax_highlighted_style, lines[0].0.as_str())]];
         paint::Painter::paint_lines(
-            &lines,
+            lines.iter().map(|(_, state)| state),
             &syntax_style_sections,
             &diff_style_sections,
             &[false],

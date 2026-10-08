@@ -203,7 +203,7 @@ impl<'p> Painter<'p> {
             );
         } else {
             Painter::paint_lines(
-                lines,
+                lines.iter().map(|(_, state)| state),
                 &syntax_style_sections,
                 diff_style_sections.as_slice(),
                 &[false],
@@ -220,8 +220,8 @@ impl<'p> Painter<'p> {
     /// Superimpose background styles and foreground syntax
     /// highlighting styles, and write colored lines to output buffer.
     #[allow(clippy::too_many_arguments)]
-    pub fn paint_lines<'a>(
-        lines: &'a [(String, State)],
+    pub fn paint_lines<'a, 's>(
+        states: impl IntoIterator<Item = &'s State>,
         syntax_style_sections: &[LineSections<'a, SyntectStyle>],
         diff_style_sections: &[LineSections<'a, Style>],
         lines_have_homolog: &[bool],
@@ -239,8 +239,8 @@ impl<'p> Painter<'p> {
         // 2. We must ensure that we fill rightwards with the appropriate
         //    non-emph background color. In that case we don't use the last
         //    style of the line, because this might be emph.
-        for ((((_, state), syntax_sections), diff_sections), &line_has_homolog) in lines
-            .iter()
+        for (((state, syntax_sections), diff_sections), &line_has_homolog) in states
+            .into_iter()
             .zip_eq(syntax_style_sections)
             .zip_eq(diff_style_sections)
             .zip_eq(lines_have_homolog)
@@ -312,7 +312,7 @@ impl<'p> Painter<'p> {
             StyleSectionSpecifier::StyleSections(style_sections) => vec![style_sections],
         };
         Painter::paint_lines(
-            &lines,
+            lines.iter().map(|(_, state)| state),
             &syntax_style_sections,
             &diff_style_sections,
             &[false],
@@ -672,7 +672,7 @@ pub fn paint_minus_and_plus_lines(
         // Unified diff mode:
         if !lines[Minus].is_empty() {
             Painter::paint_lines(
-                lines[Minus],
+                lines[Minus].iter().map(|(_, state)| state),
                 &syntax_style_sections[Minus],
                 &diff_style_sections[Minus],
                 &lines_have_homolog[Minus],
@@ -686,7 +686,7 @@ pub fn paint_minus_and_plus_lines(
         }
         if !lines[Plus].is_empty() {
             Painter::paint_lines(
-                lines[Plus],
+                lines[Plus].iter().map(|(_, state)| state),
                 &syntax_style_sections[Plus],
                 &diff_style_sections[Plus],
                 &lines_have_homolog[Plus],
