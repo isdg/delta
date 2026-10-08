@@ -219,6 +219,7 @@ pub fn set_options(
             wrap_right_percent,
             wrap_right_symbol,
             wrap_left_symbol,
+            wrap_unified,
             tab_width,
             tokenization_regex,
             true_color,
@@ -242,11 +243,12 @@ pub fn set_options(
         cli::InspectRawLines::from_str(&opt.inspect_raw_lines).unwrap();
     opt.computed.paging_mode = parse_paging_mode(&opt.paging_mode);
 
-    // --color-only is used for interactive.diffFilter (git add -p). side-by-side, and
-    // **-decoration-style cannot be used there (does not emit lines in 1-1 correspondence with raw git output).
+    // --color-only is used for interactive.diffFilter (git add -p). side-by-side, wrap-unified,
+    // and **-decoration-style cannot be used there (does not emit lines in 1-1 correspondence with raw git output).
     // See #274.
     if opt.color_only {
         opt.side_by_side = false;
+        opt.wrap_unified = false;
         opt.file_decoration_style = "none".to_string();
         opt.commit_decoration_style = "none".to_string();
         opt.hunk_header_decoration_style = "none".to_string();

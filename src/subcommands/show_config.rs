@@ -51,7 +51,8 @@ fn option_values(opt: &cli::Opt) -> Vec<(String, String)> {
         diff_highlight,
         diff_so_fancy,
         no_gitconfig,
-        raw
+        raw,
+        wrap_unified
     );
     strings!(
         config,

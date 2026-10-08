@@ -32,4 +32,6 @@ In contrast, the long replacement line in the right panel overflows by almost an
 <table><tr><td><img width=600px src="https://user-images.githubusercontent.com/52205/139064537-f8479504-16d3-429a-b4f6-d0122438adaa.png" alt="image" /></td></tr></table>
 
 For control over the details of line wrapping, see `--wrap-max-lines`, `--wrap-left-symbol`, `--wrap-right-symbol`, `--wrap-right-percent`, `--wrap-right-prefix-symbol`, `--inline-hint-style`.
+
+The unified (non-side-by-side) view leaves long lines to the terminal or pager by default. Set `wrap-unified = true` (`--wrap-unified`) to wrap them the same way, with the wrapped content aligned after the line numbers.
 Line wrapping was implemented by @th1000s.

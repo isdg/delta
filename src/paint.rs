@@ -7,6 +7,7 @@ use itertools::Itertools;
 use syntect::easy::HighlightLines;
 use syntect::highlighting::Style as SyntectStyle;
 use syntect::parsing::{SyntaxReference, SyntaxSet};
+use unicode_width::UnicodeWidthStr;
 
 use crate::config::{self, delta_unreachable, Config};
 use crate::delta::{DiffType, InMergeConflict, MergeParents, State};
@@ -19,6 +20,7 @@ use crate::handlers::merge_conflict;
 use crate::minusplus::*;
 use crate::paint::superimpose_style_sections::superimpose_style_sections;
 use crate::style::Style;
+use crate::wrapping::wrap_unified_block;
 use crate::{ansi, style};
 use crate::{edits, utils, utils::tabs};
 
@@ -202,16 +204,67 @@ impl<'p> Painter<'p> {
                 BgShouldFill::With(BgFillMethod::Spaces),
             );
         } else {
-            Painter::paint_lines(
-                lines.iter().map(|(_, state)| state),
-                &syntax_style_sections,
-                diff_style_sections.as_slice(),
+            Painter::paint_unified_lines(
+                lines,
+                syntax_style_sections,
+                diff_style_sections,
                 &[false],
                 &mut self.output_buffer,
                 self.config,
                 &mut self.line_numbers_data.as_mut(),
                 &mut self.diff_line_metadata.as_mut(),
                 None,
+            );
+        }
+    }
+
+    /// Paint the lines of a unified diff block, first wrapping those that do not
+    /// fit the terminal if --wrap-unified is set.
+    #[allow(clippy::too_many_arguments)]
+    fn paint_unified_lines<'a>(
+        lines: &'a [(String, State)],
+        syntax_style_sections: Vec<LineSections<'a, SyntectStyle>>,
+        diff_style_sections: Vec<LineSections<'a, Style>>,
+        lines_have_homolog: &[bool],
+        output_buffer: &mut String,
+        config: &'a config::Config,
+        line_numbers_data: &mut Option<&mut LineNumbersData>,
+        diff_line_metadata: &mut Option<&mut DiffLineMetadata>,
+        empty_line_style: Option<Style>,
+    ) {
+        if config.wrap_unified && config.wrap_config.max_lines != 1 {
+            let (states, syntax_style_sections, diff_style_sections, lines_have_homolog) =
+                wrap_unified_block(
+                    config,
+                    lines,
+                    syntax_style_sections,
+                    diff_style_sections,
+                    lines_have_homolog,
+                    line_numbers_data.as_deref(),
+                );
+            Painter::paint_lines(
+                &states,
+                &syntax_style_sections,
+                &diff_style_sections,
+                &lines_have_homolog,
+                output_buffer,
+                config,
+                line_numbers_data,
+                diff_line_metadata,
+                empty_line_style,
+                BgShouldFill::default(),
+            );
+        } else {
+            Painter::paint_lines(
+                lines.iter().map(|(_, state)| state),
+                &syntax_style_sections,
+                &diff_style_sections,
+                lines_have_homolog,
+                output_buffer,
+                config,
+                line_numbers_data,
+                diff_line_metadata,
+                empty_line_style,
                 BgShouldFill::default(),
             );
         }
@@ -239,19 +292,33 @@ impl<'p> Painter<'p> {
         // 2. We must ensure that we fill rightwards with the appropriate
         //    non-emph background color. In that case we don't use the last
         //    style of the line, because this might be emph.
+        let mut continuation_prefix = None;
         for (((state, syntax_sections), diff_sections), &line_has_homolog) in states
             .into_iter()
             .zip_eq(syntax_style_sections)
             .zip_eq(diff_style_sections)
             .zip_eq(lines_have_homolog)
         {
+            let prefix = match state {
+                State::HunkMinusWrapped | State::HunkZeroWrapped | State::HunkPlusWrapped => {
+                    continuation_prefix.clone()
+                }
+                _ => {
+                    let prefix = painted_prefix(state.clone(), config);
+                    // Wrapped continuation rows are indented past their line's prefix.
+                    continuation_prefix = prefix
+                        .as_ref()
+                        .map(|prefix| prefix.style_ref().paint(" ".repeat(prefix.width())));
+                    prefix
+                }
+            };
             let (mut line, line_is_empty) = Painter::paint_line(
                 syntax_sections,
                 diff_sections,
                 state,
                 line_numbers_data,
                 None,
-                painted_prefix(state.clone(), config),
+                prefix,
                 config,
             );
             let (bg_fill_mode, fill_style) =
@@ -670,32 +737,38 @@ pub fn paint_minus_and_plus_lines(
         )
     } else {
         // Unified diff mode:
+        let MinusPlus {
+            minus: minus_syntax_style_sections,
+            plus: plus_syntax_style_sections,
+        } = syntax_style_sections;
+        let MinusPlus {
+            minus: minus_diff_style_sections,
+            plus: plus_diff_style_sections,
+        } = diff_style_sections;
         if !lines[Minus].is_empty() {
-            Painter::paint_lines(
-                lines[Minus].iter().map(|(_, state)| state),
-                &syntax_style_sections[Minus],
-                &diff_style_sections[Minus],
+            Painter::paint_unified_lines(
+                lines[Minus],
+                minus_syntax_style_sections,
+                minus_diff_style_sections,
                 &lines_have_homolog[Minus],
                 output_buffer,
                 config,
                 &mut line_numbers_data.as_mut(),
                 diff_line_metadata,
                 Some(config.minus_empty_line_marker_style),
-                BgShouldFill::default(),
             );
         }
         if !lines[Plus].is_empty() {
-            Painter::paint_lines(
-                lines[Plus].iter().map(|(_, state)| state),
-                &syntax_style_sections[Plus],
-                &diff_style_sections[Plus],
+            Painter::paint_unified_lines(
+                lines[Plus],
+                plus_syntax_style_sections,
+                plus_diff_style_sections,
                 &lines_have_homolog[Plus],
                 output_buffer,
                 config,
                 &mut line_numbers_data.as_mut(),
                 diff_line_metadata,
                 Some(config.plus_empty_line_marker_style),
-                BgShouldFill::default(),
             );
         }
     }
@@ -796,7 +869,7 @@ fn get_diff_style_sections<'a>(
     (diff_sections, line_alignment)
 }
 
-fn painted_prefix(state: State, config: &config::Config) -> Option<ANSIString<'_>> {
+pub fn painted_prefix(state: State, config: &config::Config) -> Option<ANSIString<'_>> {
     use DiffType::*;
     use State::*;
     match (state, config.keep_plus_minus_markers) {

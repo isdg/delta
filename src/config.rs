@@ -136,6 +136,7 @@ pub struct Config {
     pub truncation_symbol: String,
     pub whitespace_error_style: Style,
     pub wrap_config: WrapConfig,
+    pub wrap_unified: bool,
     pub zero_style: Style,
 }
 
@@ -393,6 +394,11 @@ impl From<cli::Opt> for Config {
             max_line_length: if opt.side_by_side {
                 wrap_config.config_max_line_length(
                     opt.max_line_length,
+                    opt.computed.available_terminal_width / 2,
+                )
+            } else if opt.wrap_unified {
+                wrap_config.config_max_line_length(
+                    opt.max_line_length,
                     opt.computed.available_terminal_width,
                 )
             } else {
@@ -434,6 +440,7 @@ impl From<cli::Opt> for Config {
             true_color: opt.computed.true_color,
             truncation_symbol: format!("{}→{}", ansi::ANSI_SGR_REVERSE, ansi::ANSI_SGR_RESET),
             wrap_config,
+            wrap_unified: opt.wrap_unified,
             whitespace_error_style: styles["whitespace-error-style"],
             zero_style: styles["zero-style"],
         }

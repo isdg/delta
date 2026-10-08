@@ -857,6 +857,15 @@ Options:
 
           [default: ↴]
 
+      --wrap-unified
+          Wrap long lines in the unified (non-side-by-side) view.
+
+          Lines which do not fit the terminal width are wrapped as in
+          side-by-side mode, and the wrapped content is aligned with the
+          code, after the line numbers. The --wrap-* options control the
+          details. Ignored with --color-only, whose output must correspond
+          line by line with its input.
+
       --zero-style <STYLE>
           Style string for unchanged lines.
 

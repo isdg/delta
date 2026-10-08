@@ -1,3 +1,4 @@
+use itertools::Itertools;
 use syntect::highlighting::Style as SyntectStyle;
 use unicode_segmentation::UnicodeSegmentation;
 use unicode_width::UnicodeWidthStr;
@@ -12,7 +13,7 @@ use crate::delta::State;
 use crate::features::line_numbers::{self, SideBySideLineWidth};
 use crate::features::side_by_side::{available_line_width, line_is_too_long, Left, Right};
 use crate::minusplus::*;
-use crate::paint::LineSections;
+use crate::paint::{self, LineSections};
 use crate::style::Style;
 use crate::utils::syntect::FromDeltaStyle;
 
@@ -64,12 +65,9 @@ impl WrapConfig {
         }
     }
 
-    // Compute value of `max_line_length` field in the main `Config` struct.
-    pub fn config_max_line_length(
-        &self,
-        max_line_length: usize,
-        available_terminal_width: usize,
-    ) -> usize {
+    // Compute value of `max_line_length` field in the main `Config` struct, given
+    // the width of the panel (side-by-side) or terminal (unified) lines wrap in.
+    pub fn config_max_line_length(&self, max_line_length: usize, pane_width: usize) -> usize {
         match self.max_lines {
             1 => max_line_length,
             // Ensure there is enough text to wrap, either don't truncate the input at all (0)
@@ -78,12 +76,11 @@ impl WrapConfig {
             // normal `git diff`, but might not be with ANSI heavy input.
             0 => 0,
             wrap_max_lines => {
-                let single_pane_width = available_terminal_width / 2;
                 let add_25_percent_or_term_width =
-                    |x| x + std::cmp::max((x * 250) / 1000, single_pane_width);
+                    |x| x + std::cmp::max((x * 250) / 1000, pane_width);
                 std::cmp::max(
                     max_line_length,
-                    add_25_percent_or_term_width(single_pane_width * wrap_max_lines),
+                    add_25_percent_or_term_width(pane_width * wrap_max_lines),
                 )
             }
         }
@@ -439,18 +436,7 @@ pub fn wrap_minusplus_block<'c: 'a, 'a>(
             &Some(config.wrap_config.inline_hint_syntect_style),
         );
 
-        // TODO: Why is the background color set to white when
-        // ansi_term_style.background is None?
-        let inline_hint_style = if config
-            .inline_hint_style
-            .ansi_term_style
-            .background
-            .is_some()
-        {
-            Some(config.inline_hint_style)
-        } else {
-            None
-        };
+        let inline_hint_style = diff_inline_hint_style(config);
 
         let (start2, extended_to2) = wrap_if_too_long(
             config,
@@ -575,6 +561,106 @@ pub fn wrap_minusplus_block<'c: 'a, 'a>(
     )
 }
 
+// TODO: Why is the background color set to white when
+// ansi_term_style.background is None?
+fn diff_inline_hint_style(config: &Config) -> Option<Style> {
+    if config
+        .inline_hint_style
+        .ansi_term_style
+        .background
+        .is_some()
+    {
+        Some(config.inline_hint_style)
+    } else {
+        None
+    }
+}
+
+/// Wrap the lines of a unified diff block which do not fit the terminal, see
+/// [`wrap_line`]. Return one entry per output row: a wrapped line keeps its
+/// state on its first row, and its continuation rows get `Hunk*Wrapped`.
+#[allow(clippy::type_complexity)]
+pub fn wrap_unified_block<'c: 'a, 'a>(
+    config: &'c Config,
+    lines: &[(String, State)],
+    syntax_style_sections: Vec<LineSections<'a, SyntectStyle>>,
+    diff_style_sections: Vec<LineSections<'a, Style>>,
+    lines_have_homolog: &[bool],
+    line_numbers_data: Option<&line_numbers::LineNumbersData>,
+) -> (
+    Vec<State>,
+    Vec<LineSections<'a, SyntectStyle>>,
+    Vec<LineSections<'a, Style>>,
+    Vec<bool>,
+) {
+    let terminal_width = match config.decorations_width {
+        cli::Width::Fixed(width) => width,
+        cli::Width::Variable => config.available_terminal_width,
+    };
+    let line_numbers_width = line_numbers_data.map_or(0, |data| {
+        let width = data.formatted_width();
+        width[Left] + width[Right]
+    });
+    let inline_hint_style = diff_inline_hint_style(config);
+
+    let mut states = Vec::with_capacity(lines.len());
+    let mut wrapped_syntax = Vec::with_capacity(lines.len());
+    let mut wrapped_diff = Vec::with_capacity(lines.len());
+    let mut wrapped_have_homolog = Vec::with_capacity(lines.len());
+
+    for ((((line, state), syntax), diff), &has_homolog) in lines
+        .iter()
+        .zip_eq(syntax_style_sections)
+        .zip_eq(diff_style_sections)
+        .zip_eq(lines_have_homolog)
+    {
+        let continuation = match state {
+            State::HunkMinus(_, _) => Some((State::HunkMinusWrapped, config.minus_style)),
+            State::HunkPlus(_, _) => Some((State::HunkPlusWrapped, config.plus_style)),
+            State::HunkZero(_, _) => Some((
+                State::HunkZeroWrapped,
+                Style {
+                    is_syntax_highlighted: true,
+                    ..config.null_style
+                },
+            )),
+            _ => None,
+        };
+        let prefix_width =
+            paint::painted_prefix(state.clone(), config).map_or(0, |prefix| prefix.width());
+        let line_width = terminal_width.saturating_sub(line_numbers_width + prefix_width);
+
+        match continuation {
+            Some((wrapped_state, fill_style))
+                if line_width > 0 && line_is_too_long(line, line_width) =>
+            {
+                let syntax = wrap_line(
+                    config,
+                    syntax,
+                    line_width,
+                    &config.null_syntect_style,
+                    &Some(config.wrap_config.inline_hint_syntect_style),
+                );
+                let diff = wrap_line(config, diff, line_width, &fill_style, &inline_hint_style);
+                assert_eq!(syntax.len(), diff.len(), "syntax and diff wrapping differs");
+                states.push(state.clone());
+                states.extend(std::iter::repeat_n(wrapped_state, syntax.len() - 1));
+                wrapped_have_homolog.extend(std::iter::repeat_n(has_homolog, syntax.len()));
+                wrapped_syntax.extend(syntax);
+                wrapped_diff.extend(diff);
+            }
+            _ => {
+                states.push(state.clone());
+                wrapped_have_homolog.push(has_homolog);
+                wrapped_syntax.push(syntax);
+                wrapped_diff.push(diff);
+            }
+        }
+    }
+
+    (states, wrapped_syntax, wrapped_diff, wrapped_have_homolog)
+}
+
 #[allow(clippy::comparison_chain, clippy::type_complexity)]
 pub fn wrap_zero_block<'c: 'a, 'a>(
     config: &'c Config,
@@ -616,18 +702,7 @@ pub fn wrap_zero_block<'c: 'a, 'a>(
             &Some(config.wrap_config.inline_hint_syntect_style),
         );
 
-        // TODO: Why is the background color set to white when
-        // ansi_term_style.background is None?
-        let inline_hint_style = if config
-            .inline_hint_style
-            .ansi_term_style
-            .background
-            .is_some()
-        {
-            Some(config.inline_hint_style)
-        } else {
-            None
-        };
+        let inline_hint_style = diff_inline_hint_style(config);
         let diff_style = wrap_line(
             config,
             diff_style_sections.into_iter().flatten(),
@@ -1205,5 +1280,126 @@ index 223ca50..e69de29 100644
                     │    │                              │    │3.........4.........5........>"#,
                 );
         }
+    }
+
+    const UNIFIED_ARGS: &[&str] = &[
+        "--wrap-unified",
+        "--line-numbers",
+        "--line-numbers-left-format",
+        "{nm:>2}⋮",
+        "--line-numbers-right-format",
+        "{np:>2}│",
+        "--width",
+        "32",
+    ];
+
+    const COMBINED_DIFF: &str = "\
+diff --cc a.py
+index 223ca50,e69de29..0000000
+--- a/a.py
++++ b/a.py
+@@@ -1,1 -1,1 +1,1 @@@
+- a = 1
+ -a = 2
+++a = 0123456789 0123456789 0123456789 0123456789
+";
+
+    #[test]
+    fn test_wrap_unified_minus_plus_and_zero_lines() {
+        DeltaTest::with_args(&default_wrap_cfg_plus(UNIFIED_ARGS))
+            .with_input(HUNK_MP_DIFF)
+            .expect_after_header(
+                r#"
+                #indent_mark
+                 4⋮15│abcdefghijklmnopqrstuvwxz+
+                  ⋮  │y 0123456789 0123456789 0+
+                  ⋮  │123456789 0123456789 0123+
+                  ⋮  │456789
+                 5⋮  │a = 0123456789 0123456789+
+                  ⋮  │ 0123456789 0123456789 01+
+                  ⋮  │23456789
+                  ⋮16│b = 0123456789 0123456789+
+                  ⋮  │ 0123456789 0123456789 01+
+                  ⋮  │23456789"#,
+            );
+    }
+
+    #[test]
+    fn test_wrap_unified_keep_plus_minus_markers() {
+        DeltaTest::with_args(&default_wrap_cfg_plus(
+            &[UNIFIED_ARGS, &["--keep-plus-minus-markers"]].concat(),
+        ))
+        .with_input(HUNK_MP_DIFF)
+        .expect_after_header(
+            r#"
+            #indent_mark
+             4⋮15│ abcdefghijklmnopqrstuvwx+
+              ⋮  │ zy 0123456789 0123456789+
+              ⋮  │  0123456789 0123456789 0+
+              ⋮  │ 123456789
+             5⋮  │-a = 0123456789 012345678+
+              ⋮  │ 9 0123456789 0123456789 +
+              ⋮  │ 0123456789
+              ⋮16│+b = 0123456789 012345678+
+              ⋮  │ 9 0123456789 0123456789 +
+              ⋮  │ 0123456789"#,
+        );
+    }
+
+    #[test]
+    fn test_wrap_unified_without_line_numbers() {
+        DeltaTest::with_args(&default_wrap_cfg_plus(&["--wrap-unified", "--width", "32"]))
+            .with_input(HUNK_MP_DIFF)
+            .expect_after_header(
+                r#"
+                abcdefghijklmnopqrstuvwxzy 0123+
+                456789 0123456789 0123456789 01+
+                23456789 0123456789
+                a = 0123456789 0123456789 01234+
+                56789 0123456789 0123456789
+                b = 0123456789 0123456789 01234+
+                56789 0123456789 0123456789"#,
+            );
+    }
+
+    #[test]
+    fn test_wrap_unified_combined_diff() {
+        DeltaTest::with_args(&default_wrap_cfg_plus(&["--wrap-unified", "--width", "32"]))
+            .with_input(COMBINED_DIFF)
+            .expect_after_header(
+                r#"
+               #indent_mark
+               - a = 1
+                -a = 2
+               ++a = 0123456789 0123456789 012+
+                 3456789 0123456789"#,
+            );
+    }
+
+    #[test]
+    fn test_wrap_unified_is_opt_in() {
+        DeltaTest::with_args(&default_wrap_cfg_plus(&["--width", "32"]))
+            .with_input(HUNK_MP_DIFF)
+            .expect_contains("b = 0123456789 0123456789 0123456789 0123456789 0123456789");
+    }
+
+    #[test]
+    fn test_wrap_unified_disabled_by_wrap_max_lines_0() {
+        DeltaTest::with_args(&["--wrap-unified", "--wrap-max-lines", "0", "--width", "32"])
+            .with_input(HUNK_MP_DIFF)
+            .expect_contains("b = 0123456789 0123456789 0123456789 0123456789 0123456789");
+    }
+
+    #[test]
+    fn test_wrap_unified_ignored_with_color_only() {
+        let output = DeltaTest::with_args(&[
+            "--wrap-unified",
+            "--color-only",
+            "--line-numbers",
+            "--width",
+            "32",
+        ])
+        .with_input(HUNK_MP_DIFF);
+        assert_eq!(output.output.lines().count(), HUNK_MP_DIFF.lines().count());
     }
 }
